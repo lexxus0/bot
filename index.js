@@ -1,17 +1,35 @@
 import TelegramBot from "node-telegram-bot-api";
+import express from "express";
+import bodyParser from "body-parser";
 import dotenv from "dotenv";
+import moment from "moment-timezone";
 import { localesMessages } from "./locales.js";
 
 dotenv.config();
 
 const token = process.env.TOKEN;
-const bot = new TelegramBot(token, { polling: true });
+const bot = new TelegramBot(token);
+
+const webhookUrl = process.env.WEBHOOK_URL || "https://bot-zz41.onrender.com";
+
+bot.setWebHook(`${webhookUrl}/bot${token}`);
+
+const app = express();
+app.use(bodyParser.json());
+
+app.post(`/bot${token}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
 
 let reminders = {};
 let userLanguage = {};
+let userRegion = {};
 
 const getLocalizedMessage = (key, lang) => {
-  return localesMessages[lang][key];
+  return localesMessages[lang] && localesMessages[lang][key]
+    ? localesMessages[lang][key]
+    : localesMessages["en"][key];
 };
 
 bot.onText(/\/start/, (msg) => {
@@ -33,27 +51,40 @@ bot.on("callback_query", (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
 
-  if (data === "lang_en") {
-    userLanguage[chatId] = "en";
-    bot.sendMessage(chatId, getLocalizedMessage("welcome", "en"));
-  } else if (data === "lang_ua") {
-    userLanguage[chatId] = "ua";
-    bot.sendMessage(chatId, getLocalizedMessage("welcome", "ua"));
+  if (data === "lang_en" || data === "lang_ua") {
+    userLanguage[chatId] = data === "lang_en" ? "en" : "ua";
+
+    bot.sendMessage(
+      chatId,
+      getLocalizedMessage("regionQuestion", userLanguage[chatId]),
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Ukraine", callback_data: "region_ua" },
+              { text: "Europe", callback_data: "region_eu" },
+            ],
+          ],
+        },
+      }
+    );
+
+    bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: callbackQuery.message.message_id }
+    );
   }
 
-  bot.editMessageReplyMarkup(
-    { inline_keyboard: [] },
-    {
-      chat_id: chatId,
-      message_id: callbackQuery.message.message_id,
-    }
-  );
+  if (data === "region_ua" || data === "region_eu") {
+    userRegion[chatId] = data === "region_ua" ? "Europe/Kiev" : "Europe/Madrid";
+    const lang = userLanguage[chatId] || "en";
+    bot.sendMessage(chatId, getLocalizedMessage("welcome", lang));
+  }
 });
 
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const lang = userLanguage[chatId] || "en";
-
   bot.sendMessage(chatId, getLocalizedMessage("help", lang));
 });
 
@@ -82,8 +113,14 @@ bot.onText(/\/remind/, (msg) => {
                 return;
               }
 
+              const userTimezone = userRegion[chatId] || "Europe/Kiev";
+              const reminderTime = moment
+                .tz(time, "HH:mm", userTimezone)
+                .utc()
+                .format("HH:mm");
+
               if (!reminders[chatId]) reminders[chatId] = [];
-              reminders[chatId].push({ task, time });
+              reminders[chatId].push({ task, time: reminderTime });
 
               bot.sendMessage(
                 chatId,
@@ -103,7 +140,6 @@ bot.onText(/\/show/, (msg) => {
     let reminderList = reminders[chatId]
       .map((r, i) => `${i + 1}: ${r.task} at ${r.time}`)
       .join("\n");
-
     bot.sendMessage(
       chatId,
       getLocalizedMessage("showReminders", lang)(reminderList)
@@ -127,10 +163,7 @@ bot.onText(/\/delete (\d+)/, (msg, match) => {
 });
 
 const checkReminders = () => {
-  const currentTime = new Date().toLocaleTimeString("uk-UA", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const currentTime = moment.utc().format("HH:mm");
 
   for (let chatId in reminders) {
     reminders[chatId] = reminders[chatId].filter((reminder) => {
@@ -148,3 +181,9 @@ const checkReminders = () => {
 };
 
 setInterval(checkReminders, 1000);
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server is listening on port ${PORT}`);
+});
